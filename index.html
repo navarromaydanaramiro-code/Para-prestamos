@@ -22,22 +22,12 @@ input[type=file]{padding:9px;background:#f8fafc}
 button{border:0;border-radius:10px;padding:12px 15px;font-weight:700;font-size:14px;cursor:pointer}
 .primary{background:#145da0;color:white}
 .secondary{background:#e8eef5;color:#17324f}
-.danger{background:#fff0f0;color:#a12626}
 .actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:14px}
 .muted{font-size:12px;color:#617184;line-height:1.45}
 .status{padding:10px;border-radius:9px;background:#eef5fc;font-size:13px;white-space:pre-wrap;margin-top:10px}
-.result{font-size:27px;font-weight:800;color:#12345a}
-.movement{padding:9px 0;border-bottom:1px solid #e4eaf0;font-size:13px}
-.warning{background:#fff8e8;border-left:4px solid #d89b19;padding:10px;border-radius:7px;font-size:13px;line-height:1.45}
-.good{background:#eef8f0;border-left:4px solid #38834b;padding:10px;border-radius:7px;font-size:13px;line-height:1.45}
 .decision{padding:16px;border-radius:12px;text-align:center;font-size:24px;font-weight:850;margin:14px 0}
 .decision-yes{background:#e8f6eb;border:2px solid #38834b;color:#206131}
 .decision-no{background:#fff0f0;border:2px solid #a12626;color:#8a1d1d}
-.decision-pending{background:#fff8e8;border:2px solid #d89b19;color:#76500a}
-.pill{display:inline-block;background:#fff4d8;color:#76500a;border-radius:20px;padding:5px 9px;font-size:12px;font-weight:700}
-hr{border:0;border-top:1px solid #e4eaf0;margin:14px 0}
-.check{display:flex;gap:9px;align-items:flex-start;font-size:13px}
-.check input{width:auto;margin-top:3px}
 footer{text-align:center;color:#6b7787;font-size:12px;padding:10px}
 @media(max-width:480px){
   header{padding:19px 15px}
@@ -53,6 +43,7 @@ footer{text-align:center;color:#6b7787;font-size:12px;padding:10px}
   <h1>PreEvaluación de Préstamos</h1>
   <p>Lectura inteligente de recibo y movimientos para orientar la carga del caso</p>
 </header>
+
 <main>
   <section class="card">
     <h2>1. Datos del cliente</h2>
@@ -68,6 +59,7 @@ footer{text-align:center;color:#6b7787;font-size:12px;padding:10px}
       <div>
         <label for="kind">Tipo de cliente</label>
         <select id="kind">
+          <option value="" selected>No detectado / revisar</option>
           <option>Empleado público</option>
           <option>Empleado privado</option>
           <option>Jubilado ANSES</option>
@@ -86,23 +78,49 @@ footer{text-align:center;color:#6b7787;font-size:12px;padding:10px}
 
   <section class="card">
     <h2>2. Cargar documentación</h2>
+
     <label for="receipt">Recibo de sueldo / comprobante de ingresos (PDF, JPG o PNG)</label>
     <input id="receipt" type="file" accept=".pdf,image/*">
 
     <label for="bank">Últimos movimientos bancarios (PDF, JPG o PNG)</label>
     <input id="bank" type="file" accept=".pdf,image/*">
 
+    <div class="grid" style="margin-top:12px">
+      <div>
+        <label for="gross">Ingreso bruto leído del recibo ($)</label>
+        <input id="gross" type="number" min="0" step="0.01" placeholder="Se completa al leer" readonly>
+      </div>
+      <div>
+        <label for="deductions">Descuentos leídos del recibo ($)</label>
+        <input id="deductions" type="number" min="0" step="0.01" placeholder="Se completa al leer" readonly>
+      </div>
+      <div>
+        <label for="netIncome">Ingreso neto leído del recibo ($)</label>
+        <input id="netIncome" type="number" min="0" step="0.01" placeholder="Se completa al leer" readonly>
+      </div>
+    </div>
+
     <p class="muted">
-      La lectura se realiza en el dispositivo mediante servicios de código abierto cargados desde internet.
-      Los archivos no se envían a esta aplicación ni se guardan en un servidor.
-      Para documentos confidenciales, usá únicamente archivos que el cliente haya autorizado a revisar.
+      Al seleccionar el recibo, se intenta completar nombre, CUIL, tipo de cliente,
+      período, bruto, descuentos e ingreso neto. Revisá los datos contra el documento;
+      la lectura puede equivocarse. Los campos identificatorios que no se detecten
+      quedarán para completar manualmente.
+    </p>
+
+    <p class="muted">
+      La lectura se realiza en el dispositivo mediante servicios de código abierto
+      cargados desde internet. Los archivos no se envían a esta aplicación ni se
+      guardan en un servidor. Usá únicamente documentos que el cliente haya autorizado
+      a revisar.
     </p>
 
     <div id="movementResults"></div>
+
     <div class="actions">
       <button class="primary" id="read">Leer documentación y evaluar caso</button>
       <button class="secondary" id="clear">Limpiar</button>
     </div>
+
     <div id="status" class="status" aria-live="polite">
       Esperando documentación. La lectura puede tardar según la cantidad y calidad de las páginas.
     </div>
@@ -119,89 +137,134 @@ footer{text-align:center;color:#6b7787;font-size:12px;padding:10px}
 
 <script>
 if(window.pdfjsLib){
-  pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js'
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 }
 
-const $=id=>document.getElementById(id);
-let receiptText='',bankText='',movementRows=[],stopDebit='No analizado';
+const $ = id => document.getElementById(id);
+
+let receiptText = '';
+let bankText = '';
+let movementRows = [];
+let stopDebit = 'No analizado';
+let receiptLoadedFile = null;
 
 function amounts(text){
   return [...new Set([
     ...text.matchAll(/(?:\$\s*)?\b\d{1,3}(?:[.\s]\d{3})+(?:,\d{1,2})?\b|(?:\$\s*)?\b\d{4,}(?:,\d{1,2})?\b/g)
-  ].map(m=>m[0].replace(/\$/g,'').trim()))].slice(0,25)
+  ].map(m => m[0].replace(/\$/g,'').trim()))].slice(0,25);
 }
 
-function parseAmount(s){
-  return Number(String(s).replace(/[^0-9,.-]/g,'').replace(/\./g,'').replace(',','.'))||0
+function parseAmount(value){
+  return Number(
+    String(value)
+      .replace(/[^0-9,.-]/g,'')
+      .replace(/\./g,'')
+      .replace(',','.')
+  ) || 0;
 }
 
 function groupPdfLines(items){
-  const rows=[];
-  for(const it of items){
-    const y=it.transform?.[5]||0;
-    let row=rows.find(r=>Math.abs(r.y-y)<3);
+  const rows = [];
+
+  for(const item of items){
+    const y = item.transform?.[5] || 0;
+    let row = rows.find(r => Math.abs(r.y-y) < 3);
+
     if(!row){
-      row={y,parts:[]};
+      row = {y,parts:[]};
       rows.push(row);
     }
-    row.parts.push({x:it.transform?.[4]||0,s:it.str});
+
+    row.parts.push({x:item.transform?.[4] || 0,s:item.str});
   }
+
   return rows
-    .sort((a,b)=>b.y-a.y)
-    .map(r=>r.parts.sort((a,b)=>a.x-b.x).map(x=>x.s).join(' ').trim())
+    .sort((a,b) => b.y-a.y)
+    .map(row =>
+      row.parts
+        .sort((a,b) => a.x-b.x)
+        .map(part => part.s)
+        .join(' ')
+        .trim()
+    )
     .filter(Boolean)
     .join('\n');
 }
 
 async function readFile(file){
-  if(!file)return '';
-  let pages=[];
+  if(!file) return '';
 
-  if(file.type==='application/pdf'||file.name.toLowerCase().endsWith('.pdf')){
-    if(!window.pdfjsLib)throw Error('No se pudo cargar el lector PDF.');
-    const pdf=await pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise;
+  const pages = [];
 
-    for(let p=1;p<=Math.min(pdf.numPages,12);p++){
-      const page=await pdf.getPage(p);
-      const content=await page.getTextContent();
-      let text=groupPdfLines(content.items);
+  if(file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')){
+    if(!window.pdfjsLib){
+      throw Error('No se pudo cargar el lector PDF. Revisá la conexión a internet.');
+    }
 
-      if(text.trim().length<30){
-        const vp=page.getViewport({scale:1.7});
-        const canvas=document.createElement('canvas');
-        const ctx=canvas.getContext('2d');
-        canvas.width=vp.width;
-        canvas.height=vp.height;
-        await page.render({canvasContext:ctx,viewport:vp}).promise;
-        text=(await Tesseract.recognize(canvas,'spa+eng')).data.text;
+    const pdf = await pdfjsLib.getDocument({
+      data: await file.arrayBuffer()
+    }).promise;
+
+    for(let pageNumber=1; pageNumber<=Math.min(pdf.numPages,12); pageNumber++){
+      const page = await pdf.getPage(pageNumber);
+      const content = await page.getTextContent();
+      let text = groupPdfLines(content.items);
+
+      if(text.trim().length < 30){
+        const viewport = page.getViewport({scale:1.7});
+        const canvas = document.createElement('canvas');
+        const context = canvas.getContext('2d');
+
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+
+        await page.render({
+          canvasContext:context,
+          viewport
+        }).promise;
+
+        text = (await Tesseract.recognize(canvas,'spa+eng')).data.text;
       }
+
       pages.push(text);
     }
   }else{
-    if(!window.Tesseract)throw Error('No se pudo cargar el lector de imágenes.');
-    pages.push((await Tesseract.recognize(file,'spa+eng',{
-      logger:m=>{
-        if(m.status==='recognizing text'){
-          $('status').textContent='Leyendo '+file.name+': '+Math.round(m.progress*100)+'%';
+    if(!window.Tesseract){
+      throw Error('No se pudo cargar el lector de imágenes. Revisá la conexión a internet.');
+    }
+
+    const result = await Tesseract.recognize(file,'spa+eng',{
+      logger: message => {
+        if(message.status === 'recognizing text'){
+          $('status').textContent =
+            'Leyendo ' + file.name + ': ' +
+            Math.round(message.progress*100) + '%';
         }
       }
-    })).data.text);
+    });
+
+    pages.push(result.data.text);
   }
 
   return pages.join('\n');
 }
 
 function suggest(text){
-  const lines=text.split(/\n/).map(x=>x.trim()).filter(Boolean);
-  const find=terms=>{
+  const lines = text.split(/\n/).map(line=>line.trim()).filter(Boolean);
+
+  const find = terms => {
     for(const line of lines){
       if(terms.test(line)){
-        const ms=amounts(line);
-        if(ms.length)return parseAmount(ms[ms.length-1]);
+        const matches = amounts(line);
+        if(matches.length){
+          return parseAmount(matches[matches.length-1]);
+        }
       }
     }
     return null;
   };
+
   return {
     net:find(/neto|líquido|liquido|a cobrar|haber neto|total acreditado/i),
     gross:find(/bruto|total haberes|haber\s+total/i),
@@ -209,114 +272,270 @@ function suggest(text){
   };
 }
 
+function extractClientData(text){
+  const lines = text
+    .split(/\n/)
+    .map(line=>line.replace(/\s+/g,' ').trim())
+    .filter(Boolean);
+
+  let name = '';
+
+  for(let i=0; i<lines.length; i++){
+    const line = lines[i];
+
+    const match = line.match(
+      /(?:apellido\s*y\s*nombres?|nombre\s*y\s*apellido|titular)\s*[:\-]?\s*([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑa-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑa-záéíóúñ.]+){1,5})/i
+    );
+
+    if(match){
+      name = match[1].trim();
+      break;
+    }
+
+    if(/apellido\s*y\s*nombres?|nombre\s*y\s*apellido|titular/i.test(line) && i+1 < lines.length){
+      const nextLine = lines[i+1];
+
+      if(/^[A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑa-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑa-záéíóúñ.]+){1,5}$/.test(nextLine)){
+        name = nextLine;
+        break;
+      }
+    }
+  }
+
+  const cuilMatch = text.match(/\b(20|23|24|27|30|33|34)[\s-]?\d{8}[\s-]?\d\b/);
+  let cuil = cuilMatch ? cuilMatch[0].replace(/\D/g,'') : '';
+
+  if(cuil.length === 11){
+    cuil = cuil.slice(0,2) + '-' + cuil.slice(2,10) + '-' + cuil.slice(10);
+  }
+
+  const lower = text.toLowerCase();
+  let kind = null;
+
+  if(/jubilad[oa].{0,35}(anses|sipa)|anses.{0,35}jubilad|beneficio previsional/i.test(lower)){
+    kind = 'Jubilado ANSES';
+  }else if(/pensionad[oa].{0,35}anses|pensi[oó]n.{0,25}anses/i.test(lower)){
+    kind = 'Pensionado ANSES';
+  }else if(/instituto de previsi[oó]n social|\bips\b/i.test(lower)){
+    kind = 'Jubilado IPS';
+  }else if(/monotributista|monotributo/i.test(lower)){
+    kind = 'Monotributista';
+  }else if(/empleador.{0,30}(ministerio|municipalidad|provincia|estado|municipio)|administraci[oó]n p[uú]blica/i.test(lower)){
+    kind = 'Empleado público';
+  }else if(/recibo de haberes|liquidaci[oó]n de haberes|recibo de sueldo/i.test(lower)){
+    kind = 'Empleado privado';
+  }
+
+  const months =
+    'enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre';
+
+  const periodMatch = text.match(
+    new RegExp(
+      '(?:per[ií]odo|periodo|liquidaci[oó]n|haberes de|correspondiente a)?\\s*[:\\-]?\\s*(' +
+      months +
+      ')\\s+(20\\d{2})',
+      'i'
+    )
+  );
+
+  const period = periodMatch
+    ? periodMatch[1][0].toUpperCase() +
+      periodMatch[1].slice(1).toLowerCase() +
+      ' ' +
+      periodMatch[2]
+    : '';
+
+  if(name) $('name').value = name;
+  if(cuil) $('cuil').value = cuil;
+
+  if(kind){
+    const option = [...$('kind').options].find(item=>item.text === kind);
+    if(option) $('kind').value = option.value;
+  }
+
+  if(period) $('period').value = period;
+}
+
+function fillReceiptFields(text){
+  extractClientData(text);
+
+  const result = suggest(text);
+  let gross = result.gross;
+  let net = result.net;
+  let deductions = result.ded;
+
+  if(net === null && gross !== null && deductions !== null){
+    net = gross - deductions;
+  }
+
+  if(gross === null && net !== null && deductions !== null){
+    gross = net + deductions;
+  }
+
+  if(deductions === null && gross !== null && net !== null){
+    deductions = gross - net;
+  }
+
+  $('gross').value = gross === null ? '' : gross.toFixed(2);
+  $('deductions').value = deductions === null ? '' : deductions.toFixed(2);
+  $('netIncome').value = net === null ? '' : net.toFixed(2);
+
+  return net;
+}
+
+async function readReceiptAutomatically(file){
+  if(!file) return;
+
+  receiptText = '';
+  receiptLoadedFile = null;
+  $('out').style.display = 'none';
+  $('status').textContent = 'Leyendo automáticamente el recibo...';
+
+  try{
+    receiptText = await readFile(file);
+    receiptLoadedFile = file;
+    fillReceiptFields(receiptText);
+    $('status').textContent =
+      'Lectura del recibo terminada. Revisá los importes extraídos contra el documento.';
+  }catch(error){
+    $('status').textContent = 'No se pudo leer el recibo: ' + error.message;
+    console.error(error);
+  }
+}
+
 function analyzeMovements(text){
-  const lines=text.split(/\n/).map(x=>x.replace(/\s+/g,' ').trim()).filter(Boolean);
-  const rows=[];
-  const skip=/saldo (anterior|actual|final)|total (del|de la|general)|resumen|l[ií]mite|disponible|fecha de cierre/i;
-  const credit=/acredit|haber|dep[oó]sito|transferencia recibida|sueldo|cobro|reintegro|devoluci[oó]n|cr[eé]dito/i;
-  const debit=/d[eé]bito|compra|pago|cuota|extracci[oó]n|transferencia enviada|servicio|impuesto|retenci[oó]n|consumo/i;
-  const stop=/stop\s*-?\s*debit|suspensi[oó]n.{0,20}d[eé]bito|bloqueo.{0,20}d[eé]bito|d[eé]bito.{0,25}(rechazad|revers|devuelt|anulad|no efectuad)|rechazad[oa].{0,20}d[eé]bito|revers[oa]|contracargo|d[eé]bito no efectuado/i;
+  const lines = text
+    .split(/\n/)
+    .map(line=>line.replace(/\s+/g,' ').trim())
+    .filter(Boolean);
+
+  const rows = [];
+
+  const skip =
+    /saldo (anterior|actual|final)|total (del|de la|general)|resumen|l[ií]mite|disponible|fecha de cierre/i;
+  const credit =
+    /acredit|haber|dep[oó]sito|transferencia recibida|sueldo|cobro|reintegro|devoluci[oó]n|cr[eé]dito/i;
+  const debit =
+    /d[eé]bito|compra|pago|cuota|extracci[oó]n|transferencia enviada|servicio|impuesto|retenci[oó]n|consumo/i;
+  const stop =
+    /stop\s*-?\s*debit|suspensi[oó]n.{0,20}d[eé]bito|bloqueo.{0,20}d[eé]bito|d[eé]bito.{0,25}(rechazad|revers|devuelt|anulad|no efectuad)|rechazad[oa].{0,20}d[eé]bito|revers[oa]|contracargo|d[eé]bito no efectuado/i;
 
   for(const line of lines){
-    if(skip.test(line))continue;
-    const ms=[...line.matchAll(/(?:\$\s*)?-?\(?\d{1,3}(?:[.\s]\d{3})+(?:,\d{1,2})?\)?|(?:\$\s*)?-?\(?\d{4,}(?:,\d{1,2})?\)?/g)];
-    if(!ms.length)continue;
+    if(skip.test(line)) continue;
 
-    const hasDate=/\b\d{1,2}[\/.-]\d{1,2}(?:[\/.-]\d{2,4})?\b/.test(line);
-    if(!(hasDate||credit.test(line)||debit.test(line)||line.length>8))continue;
+    const matches = [...line.matchAll(
+      /(?:\$\s*)?-?\(?\d{1,3}(?:[.\s]\d{3})+(?:,\d{1,2})?\)?|(?:\$\s*)?-?\(?\d{4,}(?:,\d{1,2})?\)?/g
+    )];
 
-    const raw=ms[ms.length-1][0];
-    const value=Math.abs(parseAmount(raw));
-    if(!value)continue;
+    if(!matches.length) continue;
 
-    const type=credit.test(line)
-      ?'Acreditación'
-      :debit.test(line)
-        ?'Débito'
-        :(/^\s*-|\(/.test(raw)?'Débito':'Sin clasificar');
+    const hasDate = /\b\d{1,2}[\/.-]\d{1,2}(?:[\/.-]\d{2,4})?\b/.test(line);
+    if(!(hasDate || credit.test(line) || debit.test(line) || line.length > 8)) continue;
 
-    if(type!=='Sin clasificar'){
+    const raw = matches[matches.length-1][0];
+    const value = Math.abs(parseAmount(raw));
+    if(!value) continue;
+
+    const type = credit.test(line)
+      ? 'Acreditación'
+      : debit.test(line)
+        ? 'Débito'
+        : (/^\s*-|\(/.test(raw) ? 'Débito' : 'Sin clasificar');
+
+    if(type !== 'Sin clasificar'){
       rows.push({line,type,value,stop:stop.test(line)});
     }
   }
 
   return {
     rows:rows.slice(0,100),
-    stopEvidence:rows.filter(r=>r.stop)
+    stopEvidence:rows.filter(row=>row.stop)
   };
 }
 
 function showDecision(qualified){
-  const box=$('out');
-  const label=$('decision');
-  const text=qualified?'CARGAR CASO':'RECHAZAR CASO';
-  label.textContent=text;
-  label.className='decision '+(qualified?'decision-yes':'decision-no');
-  box.style.display='block';
+  const box = $('out');
+  const label = $('decision');
+  const text = qualified ? 'CARGAR CASO' : 'RECHAZAR CASO';
+
+  label.textContent = text;
+  label.className = 'decision ' + (qualified ? 'decision-yes' : 'decision-no');
+  box.style.display = 'block';
 }
 
-$('read').onclick=async()=>{
-  const r=$('receipt').files[0];
-  const b=$('bank').files[0];
+$('receipt').addEventListener('change',()=>{
+  readReceiptAutomatically($('receipt').files[0]);
+});
 
-  if(!r&&!b){
-    $('status').textContent='Seleccioná el recibo y los últimos movimientos para evaluar.';
+$('read').onclick = async()=>{
+  const receipt = $('receipt').files[0];
+  const bank = $('bank').files[0];
+
+  if(!receipt || !bank){
+    $('status').textContent =
+      'Seleccioná el recibo y los últimos movimientos para evaluar.';
     return;
   }
 
-  $('read').disabled=true;
-  $('out').style.display='none';
-  $('status').textContent='Iniciando lectura inteligente...';
+  $('read').disabled = true;
+  $('out').style.display = 'none';
 
   try{
-    let incomeNet=null;
-
-    if(r){
-      receiptText=await readFile(r);
-      const x=suggest(receiptText);
-      if(x.net!==null)incomeNet=x.net;
-      else if(x.gross!==null)incomeNet=x.gross-(x.ded||0);
+    if(receiptLoadedFile !== receipt){
+      await readReceiptAutomatically(receipt);
+      if(receiptLoadedFile !== receipt){
+        throw Error('No se pudo leer el recibo.');
+      }
     }
 
-    $('status').textContent=b?'Leyendo movimientos bancarios...':'Analizando recibo...';
+    const netIncome = Number($('netIncome').value) || 0;
 
-    if(b){
-      bankText=await readFile(b);
-      const m=analyzeMovements(bankText);
-      movementRows=m.rows;
-      stopDebit=m.stopEvidence.length?'Posible indicio detectado':'Sin indicio textual claro';
-    }
+    $('status').textContent = 'Leyendo movimientos bancarios...';
+    bankText = await readFile(bank);
 
-    const debtWords=/cuota|pr[eé]stamo|cr[eé]dito|financiera|mutual|financiaci[oó]n|adelanto|caja de/i;
-    const installments=movementRows
-      .filter(x=>x.type==='Débito'&&debtWords.test(x.line))
-      .reduce((sum,x)=>sum+x.value,0);
+    const movementAnalysis = analyzeMovements(bankText);
+    movementRows = movementAnalysis.rows;
+    stopDebit = movementAnalysis.stopEvidence.length
+      ? 'Posible indicio detectado'
+      : 'Sin indicio textual claro';
 
-    const readableBank=!!b&&movementRows.length>0;
-    const canLoad=!!r&&!!b&&incomeNet!==null&&incomeNet>0&&readableBank&&(incomeNet-installments>0);
+    const debtWords =
+      /cuota|pr[eé]stamo|cr[eé]dito|financiera|mutual|financiaci[oó]n|adelanto|caja de/i;
 
-    $('status').textContent='';
-    $('movementResults').innerHTML='';
+    const installments = movementRows
+      .filter(row=>row.type === 'Débito' && debtWords.test(row.line))
+      .reduce((sum,row)=>sum+row.value,0);
+
+    const readableBank = movementRows.length > 0;
+    const canLoad = netIncome > 0 && readableBank && (netIncome-installments > 0);
+
+    $('status').textContent = '';
+    $('movementResults').innerHTML = '';
     showDecision(canLoad);
-  }catch(e){
-    $('status').textContent='No se pudo leer la documentación. Revisá los archivos e intentá nuevamente.';
-    console.error(e);
+  }catch(error){
+    $('status').textContent =
+      'No se pudo leer toda la documentación. Revisá los archivos e intentá nuevamente.';
+    console.error(error);
   }finally{
-    $('read').disabled=false;
+    $('read').disabled = false;
   }
 };
 
-$('clear').onclick=()=>{
-  document.querySelectorAll('#name,#cuil,#period').forEach(x=>x.value='');
-  $('kind').selectedIndex=0;
-  document.querySelectorAll('input[type=file]').forEach(x=>x.value='');
-  receiptText='';
-  bankText='';
-  movementRows=[];
-  stopDebit='No analizado';
-  $('movementResults').innerHTML='';
-  $('status').textContent='';
-  $('out').style.display='none';
+$('clear').onclick = ()=>{
+  document.querySelectorAll('#name,#cuil,#period').forEach(input=>input.value='');
+  $('kind').selectedIndex = 0;
+  document.querySelectorAll('input[type=file]').forEach(input=>input.value='');
+  $('gross').value = '';
+  $('deductions').value = '';
+  $('netIncome').value = '';
+  receiptText = '';
+  bankText = '';
+  receiptLoadedFile = null;
+  movementRows = [];
+  stopDebit = 'No analizado';
+  $('movementResults').innerHTML = '';
+  $('status').textContent = '';
+  $('out').style.display = 'none';
 };
 </script>
 </body>
