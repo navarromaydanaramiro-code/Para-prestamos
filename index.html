@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#12345a">
 <title>PreEvaluación de Préstamos</title>
+
 <style>
 :root{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#172334;background:#f3f6fa}
 *{box-sizing:border-box}
@@ -20,9 +21,9 @@ label{display:block;font-size:13px;font-weight:650;margin:10px 0 5px}
 input,select{width:100%;border:1px solid #cbd5e1;border-radius:9px;padding:11px;font:inherit;background:#fff;color:#172334}
 input[type=file]{padding:9px;background:#f8fafc}
 button{border:0;border-radius:10px;padding:12px 15px;font-weight:700;font-size:14px;cursor:pointer}
+button:disabled{opacity:.6;cursor:wait}
 .primary{background:#145da0;color:#fff}
 .secondary{background:#e8eef5;color:#17324f}
-button:disabled{opacity:.6;cursor:wait}
 .actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:14px}
 .muted{font-size:12px;color:#617184;line-height:1.45}
 .status{padding:10px;border-radius:9px;background:#eef5fc;font-size:13px;white-space:pre-wrap;margin-top:10px}
@@ -30,12 +31,6 @@ button:disabled{opacity:.6;cursor:wait}
 .decision-yes{background:#e8f6eb;border:2px solid #38834b;color:#206131}
 .decision-no{background:#fff0f0;border:2px solid #a12626;color:#8a1d1d}
 .summary{font-size:14px;line-height:1.7;text-align:center;color:#172334}
-.bcra-table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13px}
-.bcra-table th,.bcra-table td{padding:8px;border-bottom:1px solid #dce4ed;text-align:left;vertical-align:top}
-.bcra-table th{background:#eef5fc;color:#12345a}
-.bcra-card{overflow-x:auto}
-.situation{display:inline-block;padding:3px 7px;border-radius:10px;background:#eef5fc;font-weight:700}
-.summary strong{font-size:16px}
 footer{text-align:center;color:#6b7787;font-size:12px;padding:10px}
 @media(max-width:480px){
   header{padding:19px 15px}
@@ -44,8 +39,8 @@ footer{text-align:center;color:#6b7787;font-size:12px;padding:10px}
 }
 </style>
 
-<script src="[https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js](https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js)"></script>
-<script src="[https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js](https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js)"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 </head>
 
 <body>
@@ -97,3 +92,438 @@ footer{text-align:center;color:#6b7787;font-size:12px;padding:10px}
 
     <div class="grid" style="margin-top:12px">
       <div>
+        <label for="gross">Ingreso bruto leído del recibo ($)</label>
+        <input id="gross" type="text" placeholder="Se completa al leer" readonly>
+      </div>
+      <div>
+        <label for="deductions">Descuentos leídos del recibo ($)</label>
+        <input id="deductions" type="text" placeholder="Se completa al leer" readonly>
+      </div>
+      <div>
+        <label for="netIncome">Ingreso neto leído del recibo ($)</label>
+        <input id="netIncome" type="text" placeholder="Se completa al leer" readonly>
+      </div>
+    </div>
+
+    <p class="muted">
+      Al seleccionar el recibo se intenta completar nombre, CUIL, tipo de cliente,
+      período e importes. Revisá lo extraído contra el documento; la lectura automática
+      puede equivocarse y los campos no reconocidos pueden quedar vacíos.
+    </p>
+    <p class="muted">
+      Los archivos se procesan en este dispositivo. Se requiere internet para cargar
+      los lectores de PDF e imágenes. Usá documentos que el cliente haya autorizado
+      a revisar.
+    </p>
+
+    <div class="actions">
+      <button class="primary" id="read" type="button">Leer documentación y evaluar caso</button>
+      <button class="secondary" id="clear" type="button">Limpiar</button>
+    </div>
+
+    <div id="status" class="status" aria-live="polite">
+      Seleccioná el recibo y los movimientos bancarios.
+    </div>
+  </section>
+
+  <section class="card" id="out" aria-live="polite" style="display:none">
+    <div class="decision" id="decision"></div>
+    <div class="summary" id="movementSummary"></div>
+  </section>
+
+  <footer>
+    PreEvaluación de Préstamos · Herramienta preliminar de apoyo, no constituye aprobación crediticia.
+  </footer>
+</main>
+
+<script>
+'use strict';
+
+if(window.pdfjsLib){
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+}
+
+const $ = id => document.getElementById(id);
+let receiptLoadedFile = null;
+
+function money(value){
+  return new Intl.NumberFormat('es-AR',{
+    style:'currency',
+    currency:'ARS',
+    maximumFractionDigits:2
+  }).format(Number(value)||0);
+}
+
+function parseAmount(raw){
+  let value=String(raw).replace(/[^0-9,.-]/g,'').trim();
+  if(!value)return 0;
+
+  if(value.includes(',')){
+    value=value.replace(/\./g,'').replace(',','.');
+  }else if((value.match(/\./g)||[]).length>1){
+    value=value.replace(/\./g,'');
+  }else if(/\.\d{3}$/.test(value)){
+    value=value.replace(/\./g,'');
+  }
+
+  const number=Number(value);
+  return Number.isFinite(number)?number:0;
+}
+
+function amountMatches(text){
+  return [...String(text).matchAll(
+    /(?:\$\s*)?-?\(?\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?\)?|(?:\$\s*)?-?\(?\d{4,}(?:,\d{1,2})?\)?/g
+  )];
+}
+
+function groupPdfLines(items){
+  const rows=[];
+
+  for(const item of items){
+    const y=item.transform?.[5]||0;
+    let row=rows.find(existing=>Math.abs(existing.y-y)<3);
+
+    if(!row){
+      row={y,parts:[]};
+      rows.push(row);
+    }
+
+    row.parts.push({x:item.transform?.[4]||0,text:item.str});
+  }
+
+  return rows
+    .sort((a,b)=>b.y-a.y)
+    .map(row=>row.parts
+      .sort((a,b)=>a.x-b.x)
+      .map(part=>part.text)
+      .join(' ')
+      .trim())
+    .filter(Boolean)
+    .join('\n');
+}
+
+async function recognizeImage(image){
+  if(!window.Tesseract){
+    throw new Error('No cargó el lector OCR. Revisá la conexión e intentá de nuevo.');
+  }
+
+  const result=await Tesseract.recognize(image,'spa+eng',{
+    logger:message=>{
+      if(message.status==='recognizing text'){
+        $('status').textContent='Reconociendo texto: '+Math.round(message.progress*100)+'%';
+      }
+    }
+  });
+
+  return result.data.text||'';
+}
+
+async function readFile(file){
+  if(!file)return '';
+
+  const pages=[];
+  const isPdf=file.type==='application/pdf'||file.name.toLowerCase().endsWith('.pdf');
+
+  if(isPdf){
+    if(!window.pdfjsLib){
+      throw new Error('No cargó el lector PDF. Revisá la conexión e intentá de nuevo.');
+    }
+
+    const pdf=await pdfjsLib.getDocument({
+      data:await file.arrayBuffer()
+    }).promise;
+
+    for(let pageNumber=1;pageNumber<=Math.min(pdf.numPages,15);pageNumber++){
+      $('status').textContent='Leyendo PDF, página '+pageNumber+'...';
+
+      const page=await pdf.getPage(pageNumber);
+      const content=await page.getTextContent();
+      let text=groupPdfLines(content.items);
+
+      if(text.trim().length<30){
+        const viewport=page.getViewport({scale:1.8});
+        const canvas=document.createElement('canvas');
+        const context=canvas.getContext('2d');
+
+        canvas.width=viewport.width;
+        canvas.height=viewport.height;
+
+        await page.render({
+          canvasContext:context,
+          viewport
+        }).promise;
+
+        text=await recognizeImage(canvas);
+      }
+
+      pages.push(text);
+    }
+  }else{
+    $('status').textContent='Leyendo imagen: '+file.name+'...';
+    pages.push(await recognizeImage(file));
+  }
+
+  return pages.join('\n');
+}
+
+function findValue(text,pattern){
+  const lines=text.split(/\n/).map(line=>line.replace(/\s+/g,' ').trim()).filter(Boolean);
+
+  for(const line of lines){
+    if(pattern.test(line)){
+      const matches=amountMatches(line);
+      if(matches.length){
+        return parseAmount(matches[matches.length-1][0]);
+      }
+    }
+  }
+
+  return null;
+}
+
+function extractClientData(text){
+  const lines=text.split(/\n/).map(line=>line.replace(/\s+/g,' ').trim()).filter(Boolean);
+  let name='';
+
+  for(let i=0;i<lines.length;i++){
+    const match=lines[i].match(
+      /(?:apellido\s*y\s*nombres?|nombre\s*y\s*apellido|titular)\s*[:\-]?\s*([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑa-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑa-záéíóúñ.]+){1,5})/i
+    );
+
+    if(match){
+      name=match[1].trim();
+      break;
+    }
+
+    if(
+      /apellido\s*y\s*nombres?|nombre\s*y\s*apellido|titular/i.test(lines[i]) &&
+      lines[i+1] &&
+      /^[A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑa-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑa-záéíóúñ.]+){1,5}$/.test(lines[i+1])
+    ){
+      name=lines[i+1];
+      break;
+    }
+  }
+
+  if(name)$('name').value=name;
+
+  const cuilMatch=text.match(/\b(20|23|24|27|30|33|34)[\s-]?\d{8}[\s-]?\d\b/);
+
+  if(cuilMatch){
+    const digits=cuilMatch[0].replace(/\D/g,'');
+    if(digits.length===11){
+      $('cuil').value=
+        digits.slice(0,2)+'-'+digits.slice(2,10)+'-'+digits.slice(10);
+    }
+  }
+
+  const lower=text.toLowerCase();
+  let kind='';
+
+  if(/pensionad[oa].{0,45}anses|pensi[oó]n.{0,30}anses/i.test(lower)){
+    kind='Pensionado ANSES';
+  }else if(/jubilad[oa].{0,45}(anses|sipa)|anses.{0,45}jubilad|beneficio previsional/i.test(lower)){
+    kind='Jubilado ANSES';
+  }else if(/instituto de previsi[oó]n social|\bips\b/i.test(lower)){
+    kind='Jubilado IPS';
+  }else if(/monotributista|monotributo/i.test(lower)){
+    kind='Monotributista';
+  }else if(/empleador.{0,40}(ministerio|municipalidad|provincia|estado|municipio)|administraci[oó]n p[uú]blica/i.test(lower)){
+    kind='Empleado público';
+  }else if(/recibo de haberes|liquidaci[oó]n de haberes|recibo de sueldo/i.test(lower)){
+    kind='Empleado privado';
+  }
+
+  if(kind)$('kind').value=kind;
+
+  const months='enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre';
+  const periodMatch=text.match(
+    new RegExp(
+      '(?:per[ií]odo|periodo|liquidaci[oó]n|haberes de|correspondiente a)?\\s*[:\\-]?\\s*('+
+      months+')\\s+(20\\d{2})',
+      'i'
+    )
+  );
+
+  if(periodMatch){
+    $('period').value=
+      periodMatch[1][0].toUpperCase()+
+      periodMatch[1].slice(1).toLowerCase()+
+      ' '+periodMatch[2];
+  }
+}
+
+function fillReceiptFields(text){
+  extractClientData(text);
+
+  let gross=findValue(text,/bruto|total haberes|haber\s+total/i);
+  let net=findValue(text,/neto|líquido|liquido|a cobrar|haber neto|total acreditado/i);
+  let deductions=findValue(text,/total descuentos|descuentos|retenciones|total deduc/i);
+
+  if(net===null&&gross!==null&&deductions!==null)net=gross-deductions;
+  if(gross===null&&net!==null&&deductions!==null)gross=net+deductions;
+  if(deductions===null&&gross!==null&&net!==null)deductions=gross-net;
+
+  $('gross').value=gross===null?'':money(gross);
+  $('deductions').value=deductions===null?'':money(deductions);
+  $('netIncome').value=net===null?'':money(net);
+
+  return net;
+}
+
+async function readReceipt(file){
+  if(!file)return false;
+
+  receiptLoadedFile=null;
+  $('out').style.display='none';
+  $('status').textContent='Leyendo automáticamente el recibo...';
+
+  try{
+    const text=await readFile(file);
+    fillReceiptFields(text);
+    receiptLoadedFile=file;
+    $('status').textContent='Recibo leído. Revisá los datos detectados.';
+    return true;
+  }catch(error){
+    $('status').textContent='No se pudo leer el recibo: '+error.message;
+    console.error(error);
+    return false;
+  }
+}
+
+function analyzeMovements(text){
+  const lines=text.split(/\n/).map(line=>line.replace(/\s+/g,' ').trim()).filter(Boolean);
+  const rows=[];
+
+  const skip=/saldo\s+(?:anterior|actual|final)|total\s+(?:del|de la|general)|resumen|l[ií]mite|disponible|fecha de cierre/i;
+  const credit=/acredit|haber|dep[oó]sito|transferencia recibida|sueldo|cobro|reintegro|devoluci[oó]n|cr[eé]dito/i;
+  const debit=/d[eé]bito|compra|pago|cuota|extracci[oó]n|transferencia enviada|servicio|impuesto|retenci[oó]n|consumo|pr[eé]stamo|financiera|mutual/i;
+
+  for(const line of lines){
+    if(skip.test(line))continue;
+
+    const matches=amountMatches(line);
+    if(!matches.length)continue;
+
+    const hasDate=/\b\d{1,2}[\/.-]\d{1,2}(?:[\/.-]\d{2,4})?\b/.test(line);
+    if(!(hasDate||credit.test(line)||debit.test(line)))continue;
+
+    const raw=matches[matches.length-1][0];
+    const value=Math.abs(parseAmount(raw));
+    if(!value)continue;
+
+    const type=credit.test(line)
+      ?'Acreditación'
+      :debit.test(line)
+        ?'Débito'
+        :(/^\s*-|\(/.test(raw)?'Débito':'Sin clasificar');
+
+    if(type!=='Sin clasificar'){
+      rows.push({line,type,value});
+    }
+  }
+
+  return rows;
+}
+
+function showDecision(canLoad){
+  $('decision').textContent=canLoad?'CARGAR CASO':'RECHAZAR CASO';
+  $('decision').className='decision '+(canLoad?'decision-yes':'decision-no');
+  $('out').style.display='block';
+}
+
+$('receipt').addEventListener('change',async()=>{
+  const file=$('receipt').files[0];
+
+  $('gross').value='';
+  $('deductions').value='';
+  $('netIncome').value='';
+
+  if(file)await readReceipt(file);
+});
+
+$('read').addEventListener('click',async()=>{
+  const receipt=$('receipt').files[0];
+  const bankFiles=Array.from($('bank').files);
+
+  if(!receipt){
+    $('status').textContent='Primero seleccioná el recibo.';
+    return;
+  }
+
+  if(!bankFiles.length){
+    $('status').textContent='Seleccioná al menos un archivo de movimientos bancarios.';
+    return;
+  }
+
+  $('read').disabled=true;
+  $('out').style.display='none';
+
+  try{
+    if(receiptLoadedFile!==receipt){
+      const receiptOk=await readReceipt(receipt);
+      if(!receiptOk)throw new Error('No se pudo terminar la lectura del recibo.');
+    }
+
+    const netIncome=parseAmount($('netIncome').value);
+
+    if(netIncome<=0){
+      $('status').textContent='No se detectó un ingreso neto válido. Revisá que el recibo sea legible.';
+      return;
+    }
+
+    const texts=[];
+
+    for(let i=0;i<bankFiles.length;i++){
+      $('status').textContent=
+        'Leyendo movimientos '+(i+1)+' de '+bankFiles.length+'...';
+      texts.push(await readFile(bankFiles[i]));
+    }
+
+    const rows=analyzeMovements(texts.join('\n'));
+    const credits=rows
+      .filter(row=>row.type==='Acreditación')
+      .reduce((sum,row)=>sum+row.value,0);
+    const debits=rows
+      .filter(row=>row.type==='Débito')
+      .reduce((sum,row)=>sum+row.value,0);
+
+    const remaining=netIncome-debits;
+    const canLoad=rows.length>0&&remaining>0;
+
+    showDecision(canLoad);
+
+    $('movementSummary').innerHTML=
+      '<strong>Resultado de la suma de movimientos</strong><br>'+
+      'Ingreso neto del recibo: '+money(netIncome)+'<br>'+
+      'Débitos detectados y descontados: − '+money(debits)+'<br>'+
+      '<strong>Saldo estimado: '+money(remaining)+'</strong><br>'+
+      'Acreditaciones detectadas: '+money(credits)+'<br>'+
+      '<span class="muted">Revisá los importes detectados. Si los extractos se superponen, una operación podría sumarse más de una vez; el lector también puede omitir o confundir conceptos.</span>';
+
+    $('status').textContent='Lectura terminada.';
+  }catch(error){
+    $('status').textContent=
+      'No se pudo completar la lectura: '+error.message;
+    console.error(error);
+  }finally{
+    $('read').disabled=false;
+  }
+});
+
+$('clear').addEventListener('click',()=>{
+  ['name','cuil','period','gross','deductions','netIncome']
+    .forEach(id=>$(id).value='');
+
+  $('kind').selectedIndex=0;
+  $('receipt').value='';
+  $('bank').value='';
+  receiptLoadedFile=null;
+  $('movementSummary').innerHTML='';
+  $('status').textContent='Seleccioná el recibo y los movimientos bancarios.';
+  $('out').style.display='none';
+});
+</script>
+</body>
+</html>
